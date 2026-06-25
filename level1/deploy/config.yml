@@ -1,0 +1,26 @@
+# ==========================================================
+# vLLM Configuration
+# ==========================================================
+
+model:
+  name: "Qwen/Qwen3-0.6B"
+  dtype: "auto"
+  gpu_memory_utilization: 0.90
+  max_model_len: 8192
+  tensor_parallel_size: 1
+  quantization: null
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+  api_key: "affgt6tvhhjjer74r"
+
+env:
+  CUDA_HOME: "/home/ubuntu/vllm-deployment/.venv/lib/python3.12/site-packages/nvidia/cu13"
+  VLLM_ATTENTION_BACKEND: "FLASH_ATTN"
+  VLLM_USE_FLASHINFER_SAMPLER: "0"
+  FLASHINFER_DISABLE_VERSION_CHECK: "1"
+
+logging:
+  log_level: "INFO"
+  access_log: true
