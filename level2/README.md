@@ -2,7 +2,7 @@
 
 You know how to run `vllm serve` natively (Level 1). Now package it in Docker.
 
-**Goal:** Learn 7 deployment patterns — from "just run the official image" to "full production stack with Redis + custom Python server + multi-GPU."
+**Goal:** Learn 6 deployment patterns — from "just run the official image" to "multi-service stack with chat UI."
 
 Each pattern solves a real LLM deployment problem and lives in `patterns/XX-name/`. Docker is the vehicle, not the focus.
 
@@ -180,7 +180,7 @@ Files provided:
 
 ## Pattern 06 — Docker Compose (Multi-Service Stack)
 
-**Problem:** Production inference needs more than vLLM — Redis for rate limiting, a monitoring sidecar, etc.
+**Problem:** Production inference needs more than just vLLM — you need a chat UI for users, shared networking, and health orchestration.
 
 **Directory:** `patterns/06-docker-compose-stack/`
 
@@ -193,53 +193,14 @@ Services defined in `docker-compose.yml`:
 
 | Service | Purpose |
 |---------|---------|
-| **Redis** | Rate-limit tracking, token bucket, shared counters |
-| **vLLM** | Inference engine with health dependency on Redis |
+| **vLLM** | Inference engine serving OpenAI-compatible API |
+| **Open WebUI** | ChatGPT-style chat interface for users |
 
-**What you learn:** Service discovery (internal DNS), health dependencies (`depends_on` + `condition`), Docker networks, compose file structure, GPU reservations via `deploy.resources`.
+**What you learn:** Service discovery (internal DNS), health dependencies (`depends_on` + `condition`), Docker networks, compose file structure, GPU reservations via `deploy.resources`, multi-service volumes.
 
-**Explanation:** In production, Redis serves as a shared counter for rate limiting — tracking requests per user/IP across multiple vLLM replicas. vLLM connects to Redis via its hostname `redis` (Docker's internal DNS resolves service names automatically). The `depends_on` with `condition: service_healthy` ensures vLLM waits for Redis to be ready before starting. Without this, vLLM might crash on startup if Redis isn't available. The `shm_size: 16g` flag is critical for vLLM — it allocates shared memory for tokenizer parallelism and tensor parallelism communication. Insufficient `--shm-size` causes cryptic crashes during model loading. The `deploy.resources.reservations.devices` section reserves NVIDIA GPUs — this is the Compose-native equivalent of `--gpus all`. The `hf-cache` named volume persists model weights across container restarts. The `redis-data` volume persists Redis state. Both services are on the `llm-net` bridge network, providing DNS-based service discovery. With Compose, you can add more services later: Prometheus for metrics, Grafana for dashboards, NGINX for load balancing, all on the same `llm-net` network.
+**Explanation:** Docker Compose replaces running separate `docker run` commands and wiring them together manually. vLLM loads the model and exposes an OpenAI-compatible API on port 8000. Open WebUI connects to `http://vllm:8000/v1` — Docker's internal DNS resolves the hostname `vllm` automatically. The `depends_on` with `condition: service_healthy` ensures Open WebUI waits for vLLM to finish loading the model before starting. Without this, Open WebUI starts immediately and shows connection errors until the model is ready (could be minutes for large models). The `shm_size: 16g` flag is critical for vLLM — it allocates shared memory for tokenizer parallelism and tensor parallelism communication. Insufficient `--shm-size` causes cryptic crashes during model loading. The `deploy.resources.reservations.devices` section reserves NVIDIA GPUs — this is the Compose-native equivalent of `--gpus all`. The `hf-cache` named volume persists model weights across container restarts. The `open-webui` named volume persists chat history and user accounts. Both services are on the `llm-net` bridge network, providing DNS-based service discovery. Open WebUI also handles RAG (document upload, search) and supports markdown rendering, code highlighting, and image generation if configured. This pattern is the culmination of everything learned in patterns 01–05: custom Dockerfile, env vars, volumes, HEALTHCHECK, resource management — all composed together.
 
 **Production?** ✅ Yes — single-host production starts here.
-
----
-
-## Pattern 10 — Full Production Stack
-
-**Problem:** You need everything — custom server + Redis + multi-GPU + production Dockerfile + env config + resource limits + health checks + logging.
-
-**Directory:** `patterns/10-full-production-stack/`
-
-```bash
-cd patterns/10-full-production-stack
-docker compose up -d
-```
-
-**Stack components:**
-
-| Component | Based On | Purpose |
-|-----------|----------|---------|
-| `Dockerfile` | Patterns 02, 04 | Multi-stage, layer caching, HEALTHCHECK, non-root user |
-| `server.py` | Pattern 05 | Custom vLLM library server |
-| `entrypoint.sh` | Pattern 04 | Auto HF login, sensible defaults |
-| `.env` | Pattern 03 | Token, model, config |
-| `docker-compose.yml` | Patterns 06, 05 | Redis + vLLM, resource limits, GPU reservation, logging |
-
-**Explanation:** This is the final destination. Every decision here has a reason. The `docker-compose.yml` sets `shm_size: 16g` because vLLM crashes without it. It sets `restart: unless-stopped` because GPU OOM or transient errors will crash the container. It uses `env_file: .env` instead of hardcoded values because the Hugging Face token is a secret. The `Dockerfile` uses multi-stage build so the final image doesn't contain build tools. It has `HEALTHCHECK` so Docker knows when to restart. The `deploy.resources` section reserves GPUs so other containers can't steal them. The logging driver with rotation (`max-size: 10m`, `max-file: 3`) prevents the disk from filling up with logs. Redis is on the same network for rate limiting across replicas. The `command` section passes vLLM flags with production-oriented defaults: `--enable-prefix-caching` for shared prompt prefixes, `--kv-cache-dtype` for memory efficiency, `--max-num-seqs 128` for high concurrency. The `server.py` is a thin launcher that delegates to `vllm serve` — in production you can replace it with the full programmatic server from Pattern 05.
-
-Everything composes because each pattern was designed to work independently and together. You can scale this horizontally by adding more `vllm` services behind a load balancer or move to Kubernetes for multi-host orchestration.
-
-**Dependency graph between patterns:**
-
-```
-01 (basic run) → 02 (custom Dockerfile) → 03 (env/volumes)
-                                                     ↓
-02 + 03 → 04 (production Dockerfile) → 06 (Docker Compose)
-02 + 03 → 05 (Python library) → 10 (full stack)
-04 + 05 + 06 + 03 → 10 (full stack)
-```
-
-**Production?** ✅ Yes — single-host production stack with all best practices.
 
 ---
 
@@ -252,8 +213,7 @@ Everything composes because each pattern was designed to work independently and 
 | 03 | Env & Volumes | `03-env-and-volumes/` | Secure tokens, cache models, local files |
 | 04 | Production Dockerfile | `04-production-dockerfile/` | Fast rebuilds, small images, auto-recovery |
 | 05 | Python vLLM Library | `05-python-vllm-library/` | Programmatic control, custom endpoints |
-| 06 | Docker Compose | `06-docker-compose-stack/` | Multi-service stack (vLLM + Redis) |
-| 10 | Full Production Stack | `10-full-production-stack/` | End-to-end production deployment |
+| 06 | Docker Compose | `06-docker-compose-stack/` | Multi-service stack (vLLM + Open WebUI) |
 
 ---
 
@@ -262,20 +222,18 @@ Everything composes because each pattern was designed to work independently and 
 ```
 01 (basic docker run)
  ↓
-02 (custom Dockerfile) ─────────────────────────────┐
- ↓                                                   │
-03 (env vars & volumes)  ────────────────────────┐   │
- ↓                                                │   │
-04 (production Dockerfile) ───┐                   │   │
- ↓                             │                   │   │
-05 (python vLLM library) ──┐  │                   │   │
- ↓                          │  │                   │   │
-06 (docker compose stack) ──┤  │                   │   │
- ↓                          │  │                   │   │
-10 (full production stack) ◄──┴───┴───────────────────┘
+02 (custom Dockerfile)
+ ↓
+03 (env vars & volumes)
+ ↓
+04 (production Dockerfile)
+ ↓
+05 (python vLLM library)
+ ↓
+06 (docker compose stack)
 ```
 
-Each pattern introduces one new concept. Pattern 10 combines them all. You can skip patterns you already know, but the numbered order is the recommended learning path.
+Each pattern introduces one new concept and builds on the previous. Pattern 06 combines everything — custom Dockerfile, env vars, volumes, HEALTHCHECK, resource management, and a chat UI — all composed together. Skip what you know, but the numbered order is the recommended learning path.
 
 ---
 
