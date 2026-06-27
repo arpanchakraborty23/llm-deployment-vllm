@@ -1,0 +1,46 @@
+Docker Cleanup Commands
+
+Stop all running containers
+
+    docker stop $(docker ps -q)
+
+Remove all containers
+
+    docker rm -f $(docker ps -aq)
+
+Remove all images
+
+    docker rmi -f $(docker images -aq)
+
+Remove all volumes
+
+    docker volume rm $(docker volume ls -q)
+
+Remove all custom networks
+
+    docker network prune -f
+
+Remove build cache
+
+    docker builder prune -a -f
+
+Remove everything unused
+
+    docker system prune -a --volumes -f
+
+Check Docker disk usage
+
+    docker system df
+
+(Optional) Delete all Docker data completely
+
+  Warning: This deletes everything managed by Docker.
+
+    sudo systemctl stop docker
+    sudo rm -rf /var/lib/docker
+    sudo systemctl start docker
+
+Verify reclaimed space
+
+    df -h
+    docker system df
