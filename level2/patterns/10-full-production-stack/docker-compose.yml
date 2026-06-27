@@ -1,0 +1,103 @@
+# Pattern 10: Full Production Stack
+#
+# Everything combined — the deployment pattern you'd use
+# for a real LLM inference service in production:
+#
+#   - Custom Python vLLM server (Pattern 09): full control
+#   - Redis: rate limiting, metrics, request queuing
+#   - Production Dockerfile (Pattern 06): multi-stage, health check
+#   - Environment config (Pattern 03): .env + secrets
+#   - Resource limits (Pattern 05): GPU, memory, restart
+#   - Quantized models (Pattern 07): efficient GPU usage
+#   - Multi-GPU (Pattern 08): tensor parallelism for large models
+#
+# Start: docker compose up -d
+# Test:  curl http://localhost:8000/health
+#        curl http://localhost:8000/metrics
+#        curl http://localhost:8000/v1/models
+# Stop:  docker compose down
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: llm-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks:
+      - llm-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  vllm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: llm-vllm
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+      - ./models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    shm_size: 16g
+    command:
+      - "--model"
+      - "${VLLM_MODEL:-Qwen/Qwen3-0.6B}"
+      - "--dtype"
+      - "bfloat16"
+      - "--tensor-parallel-size"
+      - "${TP_SIZE:-1}"
+      - "--gpu-memory-utilization"
+      - "0.95"
+      - "--max-model-len"
+      - "8192"
+      - "--max-num-seqs"
+      - "128"
+      - "--enable-prefix-caching"
+      - "--enable-chunked-prefill"
+      - "--kv-cache-dtype"
+      - "${KV_CACHE_DTYPE:-auto}"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - llm-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  redis-data:
+  hf-cache:
+
+networks:
+  llm-net:
+    driver: bridge

@@ -1,0 +1,2 @@
+# Production dependencies
+vllm>=0.6.0

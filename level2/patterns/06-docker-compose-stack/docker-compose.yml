@@ -1,0 +1,80 @@
+# Pattern 04: Docker Compose — Multi-service LLM Stack
+#
+# A production inference stack needs more than just vLLM:
+#   - Redis: rate limiting, request queuing, token bucket
+#   - vLLM: the inference engine
+#
+# Docker Compose ties them together with internal DNS,
+# health dependencies, and shared networks.
+#
+# Start: docker compose up -d
+# Stop:  docker compose down
+# Logs:  docker compose logs -f vllm
+# Test:  curl http://localhost:8000/v1/models
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: llm-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks:
+      - llm-net
+
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: llm-vllm
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    shm_size: 16g
+    command:
+      - "--model"
+      - "${VLLM_MODEL:-Qwen/Qwen3-0.6B}"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--gpu-memory-utilization"
+      - "0.95"
+      - "--max-model-len"
+      - "8192"
+      - "--enable-prefix-caching"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - llm-net
+
+volumes:
+  redis-data:
+  hf-cache:
+
+networks:
+  llm-net:
+    driver: bridge

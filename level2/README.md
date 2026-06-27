@@ -1,22 +1,18 @@
-﻿Perfect. Your learning path makes sense:
+﻿# Level 2 — LLM Deployment with Docker
 
-* ✅ **Level 1:** Native Linux + `vllm serve` (completed)
-* 🔜 **Level 2:** Docker (single container -> optimized)
-* **Level 3:** Docker Compose
-* **Level 4:** NGINX
-* **Level 5:** Multi-GPU
-* **Level 6:** Ray Serve
-* **Level 7:** Kubernetes
+You know how to run `vllm serve` natively (Level 1). Now package it in Docker.
 
-For **Level 2**, don't just learn "Docker". Learn **Docker deployment patterns** from beginner to production.
+**Goal:** Learn 7 deployment patterns — from "just run the official image" to "full production stack with Redis + custom Python server + multi-GPU."
+
+Each pattern solves a real LLM deployment problem and lives in `patterns/XX-name/`. Docker is the vehicle, not the focus.
 
 ---
 
-# Level 2 — Docker Deployment (vLLM)
+## Pattern 01 — Basic Docker Run
 
-## Stage 1 — Run Official Image
+**Problem:** You ran `vllm serve` natively. Now run it in a container.
 
-No Dockerfile.
+**Directory:** `patterns/01-basic-docker-run/` (empty — just run the command)
 
 ```bash
 docker run --gpus all \
@@ -26,473 +22,264 @@ docker run --gpus all \
     --model Qwen/Qwen3-0.6B
 ```
 
-**Why:** Fastest path to run vLLM in Docker. No Dockerfile, no build step, just one command. Proves GPU access from inside a container works.
+**What you learn:** GPU passthrough (`--gpus all`), port mapping (`-p 8000:8000`), volume mount for model cache, container lifecycle.
 
-**Requests it can handle:** ~10–50 concurrent (default conservative settings). With Qwen3-0.6B on a single GPU, expect ~500–1500 tokens/sec.
+**Explanation:** The vLLM image is ~8 GB (includes CUDA, PyTorch, transformers). First run pulls it, then downloads the model weights (~1.2 GB for Qwen3-0.6B). The volume mount `~/.cache/huggingface:/root/.cache/huggingface` ensures the model is cached on the host — without it, every `docker run` re-downloads the weights. The model loads into GPU memory on startup (cold start: 10–30 seconds for 0.6B, minutes for larger models). Requests queue up in the vLLM scheduler — it batches them automatically up to `--max-num-seqs` (default 256). With default settings on a single GPU, expect ~500–1500 tokens/sec for Qwen3-0.6B. The container runs in the foreground — closing the terminal kills it.
 
-**Production?** ❌ No. Missing restart policy (container dies → down forever), no health check, logs only in terminal, model download repeats on every container recreate.
-
-Architecture:
-
-```
-Host
- │
-Docker
- │
-vLLM
- │
-GPU
-```
+**Production?** ❌ No — missing restart policy, health checks, resource limits.
 
 ---
 
-## Stage 2 — Interactive Container
+## Pattern 02 — Custom Dockerfile
+
+**Problem:** The official image is generic. You need pinned versions, extra packages, or custom code.
+
+**Directory:** `patterns/02-custom-dockerfile/`
 
 ```bash
-docker run -it --rm \
-    --gpus all \
-    vllm/vllm-openai:latest 
+cd patterns/02-custom-dockerfile
+docker build -t my-vllm .
+docker run --gpus all -p 8000:8000 my-vllm
 ```
 
-Inside container:
+Files provided:
+- `Dockerfile` — minimal custom image
+- `Dockerfile.multistage` — multi-stage variant (separates build deps from runtime)
+- `requirements.txt` — pinned dependency versions
 
-```bash
-ls
-pwd
-python
-nvidia-smi
-```
+**What you learn:** Dockerfile structure, `FROM` / `COPY` / `RUN` / `ENTRYPOINT` / `CMD`, pip dependencies, image rebuilding.
 
-**Why:** Inspect what's inside the vLLM image — filesystem layout, installed packages, Python environment, GPU driver availability. Essential before writing a custom Dockerfile so you know your base.
+**Explanation:** The official image includes vLLM but not necessarily the exact version you want. By creating your own Dockerfile, you pin `vllm==0.6.3` so your deployment is reproducible. The `ENTRYPOINT` vs `CMD` distinction matters: `ENTRYPOINT` is the executable (`vllm serve`), `CMD` provides default arguments. Users can override `CMD` at runtime: `docker run ... my-vllm --model meta-llama/Llama-3.1-8B`. The `Dockerfile.multistage` variant splits the build into two stages: a builder stage that installs pip packages, and a runtime stage that copies only the installed packages — reducing image size by excluding pip caches and build artifacts. Build time depends on pip install; the official image already has most dependencies, so this is usually fast (30–60 seconds).
 
-**Requests it handles:** N/A — not running a server. Pure debugging/inspection.
-
-**Production?** ❌ No. `--rm` deletes container on exit. Learning only.
+**Production?** ❌ Not alone — foundation for production, but missing health checks, limits, persistence.
 
 ---
 
-## Stage 3 — Custom Dockerfile
+## Pattern 03 — Environment Variables & Volumes
 
-```dockerfile
-FROM vllm/vllm-openai:latest
+**Problem:** Tokens hardcoded in images are insecure. Models re-download on every container restart.
 
-WORKDIR /app
-
-COPY . .
-
-RUN pip install -r requirements.txt
-
-ENTRYPOINT ["vllm", "serve"]
-CMD ["Qwen/Qwen3-0.6B", "--host", "0.0.0.0", "--port", "8000"]
-```
-```
-# Build image
-docker build -t vllm-docker:latest .
-
-# Run image
-docker run --gpus all -p 8000:8000 vllm-docker:latest
-```
-
-**Why:** The official image is generic and inflexible. A custom Dockerfile lets you add dependencies, custom code, pin versions, and set your own entrypoint. This is how you make the image your own.
-
-**Requests it handles:** Same as Stage 1 — no tuning flags added yet. Throughput depends entirely on the `vllm serve` arguments passed at runtime or in CMD.
-
-**Production?** ❌ Not by itself. Still missing resource limits, health checks, restart policies. But it is the **foundation** every production image builds on.
-
-Learn: Docker layers, layer caching, COPY vs ADD, RUN instructions, CMD vs ENTRYPOINT.
-
----
-
-## Stage 4 — Environment Variables
+**Directory:** `patterns/03-env-and-volumes/`
 
 ```bash
-docker run \
-    -e HUGGING_FACE_HUB_TOKEN=xxxxx
-```
-
-or use a `.env` file.
-
-**Why:** Hardcoding tokens and secrets in the Dockerfile is insecure — anyone with image access gets your credentials. Env vars keep secrets outside the image, changeable at runtime without rebuilding.
-
-**Requests it handles:** N/A — infra/security concern. No direct impact on throughput.
-
-**Production?** ✅ Yes, mandatory. Always pass tokens at runtime. Combine with `--env-file` or your orchestrator's secret management.
-
-Learn: Secrets management, runtime vs build-time config, `.env` files.
-
----
-
-## Stage 5 — Named Volumes
-
-```bash
+# Named volume — persists HF cache across container lifecycles
 docker volume create hf-cache
 
-docker run ... -v hf-cache:/root/.cache/huggingface ...
+# Pass token securely at runtime
+docker run --gpus all -p 8000:8000 \
+    -v hf-cache:/root/.cache/huggingface \
+    -e HUGGING_FACE_HUB_TOKEN=$HF_TOKEN \
+    vllm/vllm-openai:latest \
+    --model meta-llama/Llama-3.2-3B-Instruct
+
+# Bind mount — use local model files (no download)
+docker run --gpus all -p 8000:8000 \
+    -v /models:/models \
+    vllm/vllm-openai:latest \
+    --model /models/Qwen3-0.6B
 ```
 
-**Why:** Model weights are 1–10+ GB. Without a named volume, every `docker run` re-downloads the model from Hugging Face. Named volumes persist across container lifecycles — download once, reuse forever.
+**What you learn:** `-e` for secrets, `--env-file` for config files, named volumes for persistence, bind mounts for local models.
 
-**Requests it handles:** Indirect benefit — eliminates startup delay from model download (minutes → seconds). Higher availability during restarts.
+**Explanation:** The Hugging Face cache is at `~/.cache/huggingface`. For gated models (Llama, Mistral), vLLM reads `HUGGING_FACE_HUB_TOKEN` from the environment to authenticate. Without it, model loading fails with a 401 error. A named volume (`docker volume create hf-cache`) persists the cache even when containers are removed — `docker rm` the container, create a new one, and the weights are already there. Startup drops from minutes to seconds. A bind mount (`-v /models:/models`) is useful when models are downloaded as a separate step (CI/CD pipeline, shared NAS, air-gapped environments). With bind mounts, the container uses the model directly from the host filesystem — no Hugging Face access needed at runtime. The `.env` file template shows the standard environment variables: `HUGGING_FACE_HUB_TOKEN`, `VLLM_MODEL`, `VLLM_GPU_MEMORY_UTILIZATION`, `VLLM_MAX_MODEL_LEN`.
 
-**Production?** ✅ Yes, must-have for any real deployment. Combine with bind mounts for pre-downloaded models.
-
-```
-Container removed
-Model still exists
-```
+**Production?** ✅ Mandatory — never hardcode tokens, never re-download models.
 
 ---
 
-## Stage 6 — Bind Mount
+## Pattern 04 — Production Dockerfile
+
+**Problem:** Naive Dockerfiles are slow to rebuild and produce bloated images.
+
+**Directory:** `patterns/04-production-dockerfile/`
 
 ```bash
-docker run ... -v /models:/models ... --model /models/Qwen3-0.6B
+cd patterns/04-production-dockerfile
+docker build -t vllm-prod .
+docker run --gpus all -d -p 8000:8000 --restart unless-stopped \
+    --shm-size=16g -v hf-cache:/root/.cache/huggingface \
+    vllm-prod --model Qwen/Qwen3-0.6B
 ```
 
-**Why:** Named volumes are Docker-managed. Bind mounts point to a host directory — useful for shared NAS, pre-downloaded model repositories, or when models live outside Docker's volume management.
+Files provided:
+- `Dockerfile` — multi-stage, HEALTHCHECK, non-root user
+- `entrypoint.sh` — auto Hugging Face login + sensible defaults
+- `requirements.txt` — production dependency
 
-**Requests it handles:** Same benefit as Stage 5 — faster startup, no re-download.
-
-**Production?** ✅ Yes. Especially in enterprise where models are stored on shared filesystems or downloaded as a separate deployment step.
-
-Learn: Host path mapping, shared model storage, offline deployment without Hugging Face.
-
----
-
-## Stage 7 — Docker Network
-
-```bash
-docker network create llm-network
-```
+**Optimizations (in order of importance):**
 
 ```
-Redis
-  |
-Docker Network
-  |
-vLLM
-  |
-FastAPI
-```
+# 1. Layer caching — install deps BEFORE copying code
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+COPY . .
 
-**Why:** A single container is limited. Production inference stacks need Redis (rate limiting, caching), a custom API gateway, monitoring, etc. Docker networks provide internal DNS so containers find each other by name instead of IP.
+# 2. Multi-stage — build tools in builder, only artifacts in runtime
+FROM vllm/vllm-openai:latest AS builder
+...
+FROM vllm/vllm-openai:latest AS runtime
+COPY --from=builder /usr/local/lib/... /usr/local/lib/...
 
-**Requests it handles:** Enables multi-service architecture. Without networking, you cannot scale beyond one container. With proper Redis-backed rate limiting, you can handle thousands of requests by distributing load.
-
-**Production?** ✅ Yes, prerequisite for any multi-service production stack. Single-container deployments are toys.
-
-Learn: Internal DNS resolution, service discovery, container-to-container communication.
-
----
-
-## Stage 8 — Resource Limits
-
-```bash
---memory=32g
---cpus=8
---gpus all
---shm-size=16g
-```
-
-**Why:** Without limits, a single container can consume all host memory (OOM kill), starve other containers of CPU, and crash the entire host. vLLM in particular needs large shared memory (`--shm-size`) for tensor parallelism and tokenization.
-
-**Requests it handles:** Stabilizes throughput. With limits, vLLM has predictable resources — no spiky latency from memory pressure. For Qwen3-0.6B, `--memory=8g --shm-size=4g` is enough. Larger models need 32g+.
-
-**Production?** ✅ Yes, mandatory. Never run production containers without resource constraints. Docker's default is unlimited — dangerous.
-
----
-
-## Stage 9 — Restart Policies
-
-```bash
---restart unless-stopped
-```
-
-or:
-
-```
---restart always
-```
-
-**Why:** Containers crash — GPU out-of-memory, model loading failure, transient bugs. Without restart policy, the service stays down until someone manually runs `docker start`. `unless-stopped` auto-restarts unless you explicitly stopped it.
-
-**Requests it handles:** Improves uptime and availability. No direct throughput impact, but a down container serves zero requests.
-
-**Production?** ✅ Yes, mandatory. Combine with health checks (Stage 11) so Docker knows when to restart.
-
----
-
-## Stage 10 — Logging
-
-```bash
-docker logs container        # view logs
-docker logs -f container     # live tail
-docker logs --tail 100       # last 100 lines
-```
-
-**Why:** When a container crashes or behaves unexpectedly, logs are your only clue. Docker captures stdout/stderr from the container — but by default, logs grow unbounded and fill the disk.
-
-**Requests it handles:** N/A — observability. But log storms can degrade I/O performance on the host.
-
-**Production?** ✅ Yes, mandatory. Add `--log-opt max-size=10m --log-opt max-file=3` to prevent disk fill. Forward logs to a central system (ELK, Loki) in production.
-
----
-
-## Stage 11 — Health Check
-
-```dockerfile
+# 3. HEALTHCHECK — Docker knows if API is truly ready
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -sf http://localhost:8000/health || exit 1
+
+# 4. Non-root user — security best practice
+RUN useradd -m -u 1000 vllm && chown -R vllm:vllm /app
+USER vllm
 ```
 
-**Why:** Docker knows if the process is alive, but not if it is actually serving requests. A model might load partially and hang, or the API might be unresponsive despite the process running. HEALTHCHECK tells Docker the real status.
+**Explanation:** Layer caching is the highest-impact optimization for development speed. Without it, changing one line of code triggers a full `pip install` — 3–5 minutes of waiting. With layer caching, `pip install` runs only when `requirements.txt` changes (rare). `COPY . .` (your code) is the last layer and takes 1–2 seconds. Multi-stage builds reduce the final image size. The builder stage compiles/installs everything; the runtime stage copies only the installed Python packages. This removes build-time artifacts (cmake cache, .o files, pip cache) from the final image — saving 500 MB to 2 GB. The `HEALTHCHECK` polls `/health` every 30 seconds. When vLLM finishes loading the model, it starts responding to `/health` with `200 OK`. If loading fails or the API hangs, Docker marks it `unhealthy` and (with `--restart unless-stopped`) restarts it automatically. Without this, Docker only restarts on process crash, not on application-level failure. The `start-period=60s` gives the model time to load before health checks begin — prevents false positives during cold start. The non-root user prevents container breakout attacks: if an attacker exploits vLLM, they get `uid 1000` permissions, not root.
 
-**Requests it handles:** Enables auto-recovery from stuck states. With restart policy (Stage 9), unhealthy → restart automatically. Load balancers also use health checks to route traffic only to healthy instances.
+**The `entrypoint.sh`** script provides auto-login to Hugging Face (reads `HUGGING_FACE_HUB_TOKEN` from the environment) and sets sensible vLLM defaults (`--gpu-memory-utilization 0.95`, `--max-model-len 8192`, `--max-num-seqs 128`, `--enable-prefix-caching`) while still allowing all flags to be overridden at runtime.
 
-**Production?** ✅ Yes, mandatory. Without it, Docker restarts only on process crash, not on application-level failure.
-
-Learn: Healthy vs Unhealthy, restart on unhealthy, integration with load balancers.
+**Production?** ✅ Yes — this is the minimal production image.
 
 ---
 
-## Stage 12 — Optimize Dockerfile (Layer Caching)
+## Pattern 05 — Python vLLM Library (Programmatic Server)
 
-Bad:
+**Problem:** `vllm serve` is a CLI wrapper. In production, you need programmatic control — custom endpoints, metrics, dynamic scheduling, multi-model routing.
 
-```
-COPY .
-RUN pip install
-```
-
-Good:
-
-```
-COPY requirements.txt
-RUN pip install
-COPY .
-```
-
-**Why:** Docker caches each layer. In the bad version, changing any source file invalidates the pip install layer — you reinstall packages on every build. The good version installs dependencies once, then only re-copies source code. Saves 1–5 minutes per rebuild.
-
-**Requests it handles:** N/A — CI/CD build time optimization. No runtime impact.
-
-**Production?** ✅ Yes, CI/CD best practice. Faster deploys = faster fixes in production.
-
----
-
-## Stage 13 — Multi-stage Build
-
-```dockerfile
-FROM vllm/vllm-openai:latest AS builder
-RUN pip install build-tools
-
-FROM vllm/vllm-openai:latest AS runtime
-COPY --from=builder /install /install
-```
-
-**Why:** Build tools (compilers, dev headers) are not needed at runtime. Multi-stage lets you build in one stage and copy only artifacts to the final stage. Result: smaller image, fewer vulnerabilities, faster pull times.
-
-**Requests it handles:** N/A — image optimization. But smaller images = faster scaling in orchestrated environments.
-
-**Production?** ✅ Yes, for custom images. Reduces attack surface and deployment time.
-
-Learn: Builder → Runtime separation, COPY --from, image size reduction.
-
----
-
-## Stage 14 — Image Size Optimization
-
-Learn:
-
-- Slim base images
-- Remove apt cache (`rm -rf /var/lib/apt/lists/*`)
-- Remove pip cache (`pip install --no-cache-dir`)
-- Use `.dockerignore` to exclude unnecessary files
-
-**Why:** Every unnecessary MB in an image slows down `docker pull` on production nodes. For a 10-node cluster, 1 GB extra = 10 GB wasted bandwidth and 30+ seconds slower rollouts.
-
-**Requests it handles:** N/A — deployment speed optimization.
-
-**Production?** ✅ Yes, especially in orchestrated environments where images are pulled frequently.
-
----
-
-## Stage 15 — Production Run Command
+**Directory:** `patterns/05-python-vllm-library/`
 
 ```bash
-docker run \
---gpus all \
--d \
--p 8000:8000 \
---restart unless-stopped \
---shm-size=16g \
--v hf-cache:/root/.cache/huggingface \
--e HUGGING_FACE_HUB_TOKEN=$HF_TOKEN \
-vllm/vllm-openai:latest \
---model Qwen/Qwen3-0.6B \
---gpu-memory-utilization 0.95 \
---max-model-len 8192
+cd patterns/05-python-vllm-library
+docker build -t vllm-python-lib .
+docker run --gpus all -p 8000:8000 \
+    --shm-size=16g \
+    -v hf-cache:/root/.cache/huggingface \
+    -e HUGGING_FACE_HUB_TOKEN=$HF_TOKEN \
+    vllm-python-lib \
+    --model Qwen/Qwen3-0.6B \
+    --dtype bfloat16 \
+    --enable-prefix-caching \
+    --api-key my-secret-key
 ```
 
-**Why:** Combines everything from stages 4, 5, 8, 9 into a single production-ready command. Detached (`-d`), auto-restarts, persistent cache, resource configured, API-tuned.
+Files provided:
+- `server.py` — FastAPI server using `AsyncLLMEngine` directly
+- `Dockerfile` — production-ready image with HEALTHCHECK
 
-**Requests it handles:** ~50–100 concurrent. With Qwen3-0.6B and tuned settings, expect ~1000–3000 tokens/sec depending on GPU. Good for small-scale production, dev/QA, or single-user apps.
+**What you learn:** `AsyncLLMEngine`, `AsyncEngineArgs`, `SamplingParams`, serving vLLM via FastAPI, custom metrics, API key auth, programmatic control vs CLI.
 
-**Production?** ✅ Yes, for single-container deployments. This is the minimal viable production command. For multi-service or high-availability, move to Docker Compose (Level 3) or Kubernetes (Level 7).
+**Custom endpoints exposed by `server.py`:**
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /v1/generate` | Custom generation with full `SamplingParams` |
+| `GET /v1/models` | List loaded model config |
+| `GET /health` | Health check for Docker / load balancers |
+| `GET /metrics` | Real-time throughput, tokens/sec, errors |
+
+**Explanation:** `vllm serve` starts an HTTP server with fixed OpenAI-compatible endpoints. That's fine for basic use, but in production you often need more: logging every request to a database, applying custom prompt templates per user, rate limiting per API key, streaming metrics to Prometheus, or switching between models at runtime without restarting. By using `AsyncLLMEngine` directly, you control the full request lifecycle. The `AsyncEngineArgs` class accepts every parameter that `vllm serve` accepts as CLI flags — but as Python objects. This means you can change config programmatically based on environment, load models dynamically, or A/B test different quantization formats. The `SamplingParams` class controls generation: temperature, top_p, top_k, stop sequences, frequency penalty, etc. You can create different `SamplingParams` per request or per user tier. The `/metrics` endpoint exposes real-time tokens/sec — essential for capacity planning and cost tracking. The API key middleware (`--api-key`) adds authentication without modifying vLLM's internals. This pattern represents the architectural shift from "using vLLM" to "building on vLLM" — the same approach used by production inference platforms.
+
+**Production?** ✅ Yes — this is how production inference services are built.
 
 ---
 
-## Stage 16 — Image Management
+## Pattern 06 — Docker Compose (Multi-Service Stack)
+
+**Problem:** Production inference needs more than vLLM — Redis for rate limiting, a monitoring sidecar, etc.
+
+**Directory:** `patterns/06-docker-compose-stack/`
 
 ```bash
-docker build -t my-vllm .
-docker images
-docker rmi IMAGE_ID
-docker tag my-vllm my-registry/my-vllm:latest
-docker push my-registry/my-vllm
+cd patterns/06-docker-compose-stack
+docker compose up -d
 ```
 
-**Why:** Running from local build does not scale to teams. Images must be versioned, tagged, pushed to a registry, and pulled on production hosts. This is the CI/CD pipeline — build once, deploy everywhere.
+Services defined in `docker-compose.yml`:
 
-**Requests it handles:** N/A — DevOps/CI. No runtime throughput impact.
+| Service | Purpose |
+|---------|---------|
+| **Redis** | Rate-limit tracking, token bucket, shared counters |
+| **vLLM** | Inference engine with health dependency on Redis |
 
-**Production?** ✅ Yes, mandatory for team workflows. Single-developer projects can skip the registry.
+**What you learn:** Service discovery (internal DNS), health dependencies (`depends_on` + `condition`), Docker networks, compose file structure, GPU reservations via `deploy.resources`.
+
+**Explanation:** In production, Redis serves as a shared counter for rate limiting — tracking requests per user/IP across multiple vLLM replicas. vLLM connects to Redis via its hostname `redis` (Docker's internal DNS resolves service names automatically). The `depends_on` with `condition: service_healthy` ensures vLLM waits for Redis to be ready before starting. Without this, vLLM might crash on startup if Redis isn't available. The `shm_size: 16g` flag is critical for vLLM — it allocates shared memory for tokenizer parallelism and tensor parallelism communication. Insufficient `--shm-size` causes cryptic crashes during model loading. The `deploy.resources.reservations.devices` section reserves NVIDIA GPUs — this is the Compose-native equivalent of `--gpus all`. The `hf-cache` named volume persists model weights across container restarts. The `redis-data` volume persists Redis state. Both services are on the `llm-net` bridge network, providing DNS-based service discovery. With Compose, you can add more services later: Prometheus for metrics, Grafana for dashboards, NGINX for load balancing, all on the same `llm-net` network.
+
+**Production?** ✅ Yes — single-host production starts here.
 
 ---
 
-## Stage 17 — Container Management
+## Pattern 10 — Full Production Stack
+
+**Problem:** You need everything — custom server + Redis + multi-GPU + production Dockerfile + env config + resource limits + health checks + logging.
+
+**Directory:** `patterns/10-full-production-stack/`
 
 ```bash
-docker run
-docker stop
-docker start
-docker restart
-docker rm
-docker exec -it
+cd patterns/10-full-production-stack
+docker compose up -d
 ```
 
-**Why:** Containers are ephemeral. You need to stop misbehaving containers, restart after config changes, exec in for debugging, and clean up unused ones. These are the everyday commands.
+**Stack components:**
 
-**Requests it handles:** N/A — operations. No throughput impact.
+| Component | Based On | Purpose |
+|-----------|----------|---------|
+| `Dockerfile` | Patterns 02, 04 | Multi-stage, layer caching, HEALTHCHECK, non-root user |
+| `server.py` | Pattern 05 | Custom vLLM library server |
+| `entrypoint.sh` | Pattern 04 | Auto HF login, sensible defaults |
+| `.env` | Pattern 03 | Token, model, config |
+| `docker-compose.yml` | Patterns 06, 05 | Redis + vLLM, resource limits, GPU reservation, logging |
 
-**Production?** ✅ Yes, indispensable. Every production engineer uses these daily.
+**Explanation:** This is the final destination. Every decision here has a reason. The `docker-compose.yml` sets `shm_size: 16g` because vLLM crashes without it. It sets `restart: unless-stopped` because GPU OOM or transient errors will crash the container. It uses `env_file: .env` instead of hardcoded values because the Hugging Face token is a secret. The `Dockerfile` uses multi-stage build so the final image doesn't contain build tools. It has `HEALTHCHECK` so Docker knows when to restart. The `deploy.resources` section reserves GPUs so other containers can't steal them. The logging driver with rotation (`max-size: 10m`, `max-file: 3`) prevents the disk from filling up with logs. Redis is on the same network for rate limiting across replicas. The `command` section passes vLLM flags with production-oriented defaults: `--enable-prefix-caching` for shared prompt prefixes, `--kv-cache-dtype` for memory efficiency, `--max-num-seqs 128` for high concurrency. The `server.py` is a thin launcher that delegates to `vllm serve` — in production you can replace it with the full programmatic server from Pattern 05.
+
+Everything composes because each pattern was designed to work independently and together. You can scale this horizontally by adding more `vllm` services behind a load balancer or move to Kubernetes for multi-host orchestration.
+
+**Dependency graph between patterns:**
+
+```
+01 (basic run) → 02 (custom Dockerfile) → 03 (env/volumes)
+                                                     ↓
+02 + 03 → 04 (production Dockerfile) → 06 (Docker Compose)
+02 + 03 → 05 (Python library) → 10 (full stack)
+04 + 05 + 06 + 03 → 10 (full stack)
+```
+
+**Production?** ✅ Yes — single-host production stack with all best practices.
 
 ---
 
-## Stage 18 — Debugging
+## Quick Reference
 
-```bash
-docker inspect
-docker stats
-docker top
-docker exec -it container bash
-```
-
-**Why:** When things go wrong in production, you need to inspect container config, check resource usage in real-time, see running processes, and explore the filesystem. These are your debugging toolkit.
-
-**Requests it handles:** N/A — debugging/monitoring. No direct throughput impact.
-
-**Production?** ✅ Yes, essential. Every production incident starts with these commands.
+| # | Pattern | Directory | What LLM Problem It Solves |
+|---|---------|-----------|---------------------------|
+| 01 | Basic Docker Run | `01-basic-docker-run/` | Containerize `vllm serve` |
+| 02 | Custom Dockerfile | `02-custom-dockerfile/` | Pin versions, add custom code |
+| 03 | Env & Volumes | `03-env-and-volumes/` | Secure tokens, cache models, local files |
+| 04 | Production Dockerfile | `04-production-dockerfile/` | Fast rebuilds, small images, auto-recovery |
+| 05 | Python vLLM Library | `05-python-vllm-library/` | Programmatic control, custom endpoints |
+| 06 | Docker Compose | `06-docker-compose-stack/` | Multi-service stack (vLLM + Redis) |
+| 10 | Full Production Stack | `10-full-production-stack/` | End-to-end production deployment |
 
 ---
 
-## Stage 19 — Performance Tuning
+## How These Patterns Build on Each Other
 
-Learn:
+```
+01 (basic docker run)
+ ↓
+02 (custom Dockerfile) ─────────────────────────────┐
+ ↓                                                   │
+03 (env vars & volumes)  ────────────────────────┐   │
+ ↓                                                │   │
+04 (production Dockerfile) ───┐                   │   │
+ ↓                             │                   │   │
+05 (python vLLM library) ──┐  │                   │   │
+ ↓                          │  │                   │   │
+06 (docker compose stack) ──┤  │                   │   │
+ ↓                          │  │                   │   │
+10 (full production stack) ◄──┴───┴───────────────────┘
+```
 
-- GPU reservation (`--gpus all` vs specific devices)
-- Huge shared memory (`--shm-size`)
-- Persistent Hugging Face cache
-- Local model mounts (avoid re-download)
-- CPU pinning (`--cpuset-cpus`)
-- Container log rotation (`--log-opt`)
-- Proper restart policies
-
-**Why:** Default Docker and vLLM settings are conservative. Tuning can double your throughput. CPU pinning reduces context-switching latency. Log rotation prevents disk-full crashes. Each tuning parameter improves either performance or reliability.
-
-**Requests it handles:** Up to 2x improvement vs default settings. With all tuning applied, Qwen3-0.6B on one GPU can handle ~100–200 concurrent requests at 2000–4000 tokens/sec.
-
-**Production?** ✅ Yes. Tuning separates a toy deployment from a production-grade one.
+Each pattern introduces one new concept. Pattern 10 combines them all. You can skip patterns you already know, but the numbered order is the recommended learning path.
 
 ---
 
-## Stage 20 — Production Pattern
-
-```
-                 Docker Host
-
-        +--------------------------+
-        |                          |
-        |     vLLM Container        |
-        |                          |
-        |   HuggingFace Cache       |
-        |                          |
-        +--------------------------+
-                   |
-           NVIDIA Container Runtime
-                   |
-               Tesla T4 / A10G
-```
-
-**Requests it handles:** ~100–200 concurrent, 2000–4000 tokens/sec (Qwen3-0.6B on single GPU). This is the ceiling for single-container Docker deployment without orchestration.
-
-**Production?** ✅ Yes for low-to-medium traffic. For higher scale, add load balancing (Level 4: NGINX), multi-GPU (Level 5), Ray Serve (Level 6), or Kubernetes (Level 7).
-
----
-
-## Skills Summary
-
-| Stage | Skill | Problem Solved | Production Ready |
-|-------|-------|---------------|:----------------:|
-| 1 | Docker basics | First container with GPU | ❌ |
-| 2 | Interactive containers | Inspect image internals | ❌ |
-| 3 | Dockerfile creation | Reproducible custom images | ❌ |
-| 4 | Environment variables | Secrets management | ✅ |
-| 5 | Persistent volumes | Model download once | ✅ |
-| 6 | Local model mounting | Offline/enterprise models | ✅ |
-| 7 | Docker networking | Multi-service communication | ✅ |
-| 8 | Resource management | Prevent OOM / host crash | ✅ |
-| 9 | Restart policies | Auto-recovery after crash | ✅ |
-| 10 | Logging | Debug production issues | ✅ |
-| 11 | Health checks | Detect stuck/unhealthy state | ✅ |
-| 12 | Layer caching | Faster CI/CD builds | ✅ |
-| 13 | Multi-stage builds | Smaller, more secure images | ✅ |
-| 14 | Image optimization | Faster deploy, less disk | ✅ |
-| 15 | Production deployment | Single-container prod | ✅ |
-| 16 | Image lifecycle | Team CI/CD workflow | ✅ |
-| 17 | Container lifecycle | Daily operations | ✅ |
-| 18 | Debugging/monitoring | Incident response | ✅ |
-| 19 | Performance tuning | Maximize throughput | ✅ |
-| 20 | Production-ready pattern | End-to-end deployment | ✅ |
-
----
-
-## Practice Files in `patterns/`
-
-Each subdirectory contains the files you need to build and run. Type every command yourself.
-
-| # | Directory | README Stage | File(s) | Commands to type |
-|---|-----------|-------------|---------|-----------------|
-| 01 | `patterns/01-official-image/` | Stage 1 | *(none -- use official image)* | `docker run --gpus all -p 8000:8000 -v ~/.cache/huggingface:/root/.cache/huggingface vllm/vllm-openai:latest --model Qwen/Qwen3-0.6B` |
-| 02 | `patterns/02-custom-dockerfile/` | Stage 3 | `Dockerfile`, `requirements.txt` | `docker build -t my-vllm patterns/02-custom-dockerfile`<br>`docker run --gpus all -p 8000:8000 my-vllm --model Qwen/Qwen3-0.6B` |
-| 03 | `patterns/03-optimized-build/` | Stage 12 | `Dockerfile`, `requirements.txt` | Same as 02, but notice the `COPY` order in the Dockerfile |
-| 04 | `patterns/04-multi-stage/` | Stage 13 | `Dockerfile`, `requirements-builder.txt`, `server.py` | `docker build -t my-vllm:multistage patterns/04-multi-stage`<br>`docker run --gpus all -p 8000:8000 my-vllm:multistage --model Qwen/Qwen3-0.6B` |
-| 05 | `patterns/05-production/` | Stage 11+15 | `Dockerfile`, `entrypoint.sh` | `docker build -t my-vllm:prod patterns/05-production`<br>`docker run --gpus all -d -p 8000:8000 --restart unless-stopped --shm-size=16g -v hf-cache:/root/.cache/huggingface -e HUGGING_FACE_HUB_TOKEN=$HF_TOKEN my-vllm:prod --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.95 --max-model-len 8192` |
-| 06 | `patterns/06-custom-server/` | Stage 3+7 | `Dockerfile`, `server.py`, `requirements.txt` | `docker build -t my-vllm:custom patterns/06-custom-server`<br>`docker run --gpus all -p 8000:8000 my-vllm:custom --model Qwen/Qwen3-0.6B`<br>`curl http://localhost:8000/metrics` |
-| 07 | `patterns/07-bind-mount/` | Stage 6 | *(empty -- just a dir)* | `huggingface-cli download Qwen/Qwen3-0.6B --local-dir /models/Qwen3-0.6B`<br>`docker run --gpus all -p 8000:8000 -v /models:/models vllm/vllm-openai:latest --model /models/Qwen3-0.6B` |
-| 08 | `patterns/08-networked/` | Stage 7 | `docker-compose.yml` | `cd patterns/08-networked`<br>`docker compose up -d`<br>`docker compose logs -f` |
-| 09 | `patterns/09-resource-limited/` | Stage 8+9 | *(empty -- just a dir)* | `docker run --gpus all -d -p 8000:8000 --name vllm-limited --restart unless-stopped --cpus="8" --memory="32g" --shm-size="16g" --log-opt max-size="10m" -v hf-cache:/root/.cache/huggingface -e HUGGING_FACE_HUB_TOKEN=$HF_TOKEN vllm/vllm-openai:latest --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.95 --max-model-len 8192 --max-num-seqs 64` |
-
-### Test the API
-
-```powershell
-curl http://localhost:8000/health
-curl http://localhost:8000/v1/models
-Invoke-RestMethod -Uri http://localhost:8000/v1/chat/completions `
-  -Method Post `
-  -Body '{"model":"","messages":[{"role":"user","content":"hello"}],"max_tokens":10}' `
-  -ContentType "application/json"
-```
+### Test the API (any pattern)
 
 ```bash
 curl http://localhost:8000/health
