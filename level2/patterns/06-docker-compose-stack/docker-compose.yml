@@ -1,44 +1,70 @@
-# Pattern 04: Docker Compose — Multi-service LLM Stack
+# =============================================================================
+# Pattern 06: Docker Compose — Multi-service LLM Stack
+# =============================================================================
 #
-# A production inference stack needs more than just vLLM:
-#   - Redis: rate limiting, request queuing, token bucket
-#   - vLLM: the inference engine
+# WHY DOCKER COMPOSE?
+#   A production inference stack needs more than just vLLM. You need:
+#     - A chat UI (Open WebUI) for users to interact with the model
+#     - Shared networking so services can talk to each other by name
+#     - Health dependencies so services start in the right order
 #
-# Docker Compose ties them together with internal DNS,
-# health dependencies, and shared networks.
+# Docker Compose replaces running separate `docker run` commands and
+# wiring them together manually. Everything is defined in one YAML file.
 #
-# Start: docker compose up -d
-# Stop:  docker compose down
-# Logs:  docker compose logs -f vllm
-# Test:  curl http://localhost:8000/v1/models
+# HOW IT WORKS:
+#   - All services share a bridge network (`llm-net`)
+#   - Internal DNS resolves service names (e.g., vllm) automatically
+#   - Services can depend on each other's health before starting
+#   - Volumes persist data (model cache, chat history) across restarts
+#
+# START: docker compose up -d
+# STOP:  docker compose down
+# LOGS:  docker compose logs -f vllm
+# TEST:  curl http://localhost:8000/v1/models
+#        open http://localhost:3000 (Open WebUI)
+# =============================================================================
 
 services:
-  redis:
-    image: redis:7-alpine
-    container_name: llm-redis
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-    networks:
-      - llm-net
 
+  # ===========================================================================
+  # vLLM - The Inference Engine
+  # ===========================================================================
+  # This is the core service. It loads the LLM into GPU memory and serves
+  # an OpenAI-compatible API. Every other service talks to vLLM.
+  # ===========================================================================
   vllm:
+    # Use the official vLLM image (~8 GB, includes CUDA + PyTorch).
+    # In production, build a custom image with pinned versions (Pattern 04).
     image: vllm/vllm-openai:latest
     container_name: llm-vllm
+
+    # Auto-restart on crash (e.g., GPU OOM), but not if you manually stop it.
+    # This is the safest restart policy for production containers.
     restart: unless-stopped
+
+    # Expose vLLM's API on the host port 8000.
+    # Open WebUI and external clients connect here.
     ports:
       - "8000:8000"
+
+    # Pass the Hugging Face token for gated models (Llama, Mistral, etc.).
+    # The token comes from your shell's environment variable $HF_TOKEN
+    # when you run `docker compose up`.
+    # Without this, gated models fail to download with a 401 error.
     environment:
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+
+    # Named volume for the Hugging Face model cache.
+    # Without this, every container restart re-downloads the model weights.
+    # With it, models are downloaded once and persist across restarts.
+    # For Qwen3-0.6B that's ~1.2 GB; for 70B models it's ~140 GB.
     volumes:
       - hf-cache:/root/.cache/huggingface
+
+    # GPU reservation via Docker Compose.
+    # This is the Compose-native equivalent of `--gpus all`.
+    # The `count: all` reserves every GPU - use `count: 1` for a single GPU.
+    # Without this, the container has no GPU access and vLLM fails to start.
     deploy:
       resources:
         reservations:
@@ -46,7 +72,16 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
+    # CRITICAL: vLLM uses /dev/shm for parallel tokenization and
+    # tensor parallelism communication. Default Docker shared memory
+    # is 64 MB - nowhere near enough. Without this, vLLM crashes with
+    # a cryptic "Bus error" during model loading.
+    # Set to at least 16 GB or half your host's RAM for large models.
     shm_size: 16g
+
+    # vLLM serve arguments. These override the image's default CMD.
+    # The model name can be overridden via $VLLM_MODEL in your shell.
     command:
       - "--model"
       - "${VLLM_MODEL:-Qwen/Qwen3-0.6B}"
@@ -54,27 +89,107 @@ services:
       - "0.0.0.0"
       - "--port"
       - "8000"
+      # Reserve 95% of GPU VRAM for model weights + KV cache.
+      # The remaining 5% is for CUDA kernels and overhead.
       - "--gpu-memory-utilization"
       - "0.95"
+      # Maximum context window (input + output tokens).
+      # 8192 is safe for most use cases. Lower = less memory usage.
       - "--max-model-len"
       - "8192"
+      # Cache KV vectors for common prompt prefixes.
+      # Speeds up repeated queries with the same system prompt
+      # by reusing previously computed attention keys/values.
       - "--enable-prefix-caching"
+
+    # Health check polls the /health endpoint every 30 seconds.
+    # vLLM returns 200 OK only after the model is fully loaded.
+    # Without this, Docker thinks the container is healthy as soon
+    # as the process starts, even if the model is still loading.
+    # The 120s start_period gives large models time to load before
+    # the first check. If health checks fail 3 times, Docker
+    # restarts the container (via restart: unless-stopped).
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       start_period: 120s
       retries: 3
-    depends_on:
-      redis:
-        condition: service_healthy
+
+    # Connect to the shared bridge network so Open WebUI can
+    # reach this service by its hostname "vllm".
     networks:
       - llm-net
 
-volumes:
-  redis-data:
-  hf-cache:
+  # ===========================================================================
+  # Open WebUI - Chat Interface
+  # ===========================================================================
+  # A full-featured ChatGPT-style UI for interacting with LLMs.
+  # Supports conversations, markdown rendering, code highlighting,
+  # document upload (RAG-ready), and image generation (if configured).
+  #
+  # It connects to any OpenAI-compatible API - in this case, vLLM.
+  # Users type messages in the browser, Open WebUI sends them to vLLM,
+  # and vLLM streams back the generated tokens.
+  # ===========================================================================
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: openweb-ui
+    restart: unless-stopped
 
+    # Expose the web UI on host port 3000.
+    # Open http://localhost:3000 in your browser after startup.
+    # The internal port is 8080 (the app's default).
+    ports:
+      - "3000:8080"
+
+    # Persist chat history, user accounts, and settings.
+    # Without this volume, all conversations are lost on container restart.
+    volumes:
+      - open-webui:/app/backend/data
+
+    # Point Open WebUI at vLLM's API.
+    # OPENAI_API_BASE_URL: vLLM runs internally on port 8000.
+    #   Docker DNS resolves "vllm" to the vLLM container's IP.
+    #   This URL is internal to the Docker network - not accessible
+    #   from the host. That's fine; Open WebUI talks to vLLM internally.
+    # OPENAI_API_KEY: vLLM doesn't require a key by default, but
+    #   Open WebUI expects one. "anything" satisfies the field check.
+    environment:
+      OPENAI_API_BASE_URL: http://vllm:8000/v1
+      OPENAI_API_KEY: anything
+
+    # Wait for vLLM to be healthy before starting Open WebUI.
+    # Without this, Open WebUI starts immediately and shows connection
+    # errors until vLLM finishes loading the model (could be minutes).
+    depends_on:
+      vllm:
+        condition: service_healthy
+
+    networks:
+      - llm-net
+
+# =============================================================================
+# Named Volumes
+# =============================================================================
+# Named volumes are managed by Docker and persist independently of containers.
+# When you run `docker compose down`, the volumes survive by default.
+# Use `docker compose down -v` to delete them (WARNING: deletes all data).
+# =============================================================================
+volumes:
+  # Hugging Face model cache: avoids re-downloading model weights.
+  hf-cache:
+  # Open WebUI data: chat history, user accounts, settings.
+  open-webui:
+
+# =============================================================================
+# Networks
+# =============================================================================
+# A bridge network provides DNS-based service discovery.
+# Services can reach each other by their compose service name (e.g., "vllm").
+# All services on the same network can communicate freely. Services not on
+# this network are isolated.
+# =============================================================================
 networks:
   llm-net:
     driver: bridge
