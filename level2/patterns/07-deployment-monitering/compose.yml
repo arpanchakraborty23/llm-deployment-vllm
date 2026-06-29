@@ -1,0 +1,165 @@
+# =============================================================================
+# Pattern 07: Deployment Monitoring — Prometheus + Grafana Observability
+# =============================================================================
+#
+# WHY OBSERVABILITY?
+#   A deployed LLM is a black box. You need to know:
+#     - How many requests are being served (throughput)
+#     - How fast tokens are generated (latency)
+#     - Is the GPU memory exhausted? (saturation)
+#     - Are errors increasing? (reliability)
+#
+# vLLM exposes Prometheus metrics at /metrics on port 8000.
+# Prometheus scrapes these metrics every 15 seconds.
+# Grafana visualizes them with pre-configured dashboards.
+#
+# START: docker compose up -d
+# STOP:  docker compose down
+# URLS:
+#   - vLLM API:    http://localhost:8000/v1/models
+#   - Open WebUI:  http://localhost:3000
+#   - Prometheus:  http://localhost:9090
+#   - Grafana:     http://localhost:3001  (admin / admin)
+# =============================================================================
+
+services:
+
+  # ===========================================================================
+  # vLLM — The Inference Engine
+  # ===========================================================================
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: llm-vllm
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    shm_size: 16g
+    command:
+      - "--model"
+      - "${VLLM_MODEL:-Qwen/Qwen3-0.6B}"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--gpu-memory-utilization"
+      - "0.90"
+      - "--max-model-len"
+      - "4096"
+      - "--enable-prefix-caching"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+    networks:
+      - llm-net
+
+  # ===========================================================================
+  # Open WebUI — Chat Interface
+  # ===========================================================================
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: openweb-ui
+    restart: unless-stopped
+    ports:
+      - "3000:8080"
+    volumes:
+      - open-webui:/app/backend/data
+    environment:
+      OPENAI_API_BASE_URL: http://vllm:8000/v1
+      OPENAI_API_KEY: anything
+      ENABLE_SIGNUP: "true"
+      DEFAULT_USER_ROLE: "user"
+      ENABLE_EMAIL_VERIFICATION: "false"
+      ENABLE_LOGIN_FORM: "true"
+    depends_on:
+      vllm:
+        condition: service_healthy
+    networks:
+      - llm-net
+
+  # ===========================================================================
+  # Prometheus — Metrics Scraper
+  # ===========================================================================
+  # Prometheus pulls metrics from vLLM's /metrics endpoint every 15s
+  # and stores them as a time series. Grafana queries Prometheus to
+  # build dashboards. Data persists in a named volume across restarts.
+  # ===========================================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: llm-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.console.libraries=/etc/prometheus/console_libraries"
+      - "--web.console.templates=/etc/prometheus/consoles"
+    depends_on:
+      vllm:
+        condition: service_healthy
+    networks:
+      - llm-net
+
+  # ===========================================================================
+  # Grafana — Metrics Dashboard
+  # ===========================================================================
+  # Grafana connects to Prometheus as a data source and renders
+  # pre-configured dashboards for LLM inference metrics.
+  # The provisioning directory auto-configures the Prometheus data source
+  # and imports the LLM metrics dashboard on startup.
+  #
+  # Default login: admin / admin (change on first login)
+  # ===========================================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: llm-grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    volumes:
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_INSTALL_PLUGINS: ""
+    depends_on:
+      prometheus:
+        condition: service_started
+    networks:
+      - llm-net
+
+# =============================================================================
+# Named Volumes
+# =============================================================================
+volumes:
+  hf-cache:
+  open-webui:
+  prometheus-data:
+  grafana-data:
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  llm-net:
+    driver: bridge

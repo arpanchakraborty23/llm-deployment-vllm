@@ -2,9 +2,44 @@
 
 You know how to run `vllm serve` natively (Level 1). Now package it in Docker.
 
-**Goal:** Learn 6 deployment patterns — from "just run the official image" to "multi-service stack with chat UI."
+**Goal:** Learn 7 deployment patterns — from "just run the official image" to "multi-service stack with observability."
 
 Each pattern solves a real LLM deployment problem and lives in `patterns/XX-name/`. Docker is the vehicle, not the focus.
+
+---
+
+## What We Built — The Journey
+
+Over 7 patterns, we took a raw `vllm serve` command and built a production-ready LLM inference platform with observability.
+
+```
+Native vLLM          → Pattern 01:        → Pattern 02:        → Pattern 03:
+vllm serve Qwen3     Basic Docker Run     Custom Dockerfile    Env & Volumes
+(runs on host)        (containerize it)    (pin deps)           (tokens + cache)
+
+                          → Pattern 04:        → Pattern 05:        → Pattern 06:
+                          Production DF        Python vLLM Lib      Docker Compose
+                          (healthcheck,        (programmatic        (vLLM + Open WebUI)
+                           multi-stage)         control + metrics)
+
+                              → Pattern 07:
+                              Prometheus + Grafana
+                              (observability stack)
+```
+
+Here is what each layer contributed:
+
+| Layer | What It Added | Why It Matters |
+|-------|--------------|----------------|
+| **Pattern 01** | `docker run` with GPU passthrough | The foundation — you can't deploy without containerizing |
+| **Pattern 02** | Custom `Dockerfile` with pinned versions | Reproducible builds — no surprise version changes |
+| **Pattern 03** | Named volumes + environment variables | Secrets never hardcoded, models not re-downloaded |
+| **Pattern 04** | Multi-stage, HEALTHCHECK, non-root user | Production-grade image — self-healing, secure, lean |
+| **Pattern 05** | `AsyncLLMEngine` + custom FastAPI server | Programmatic control — custom metrics, auth, scheduling |
+| **Pattern 06** | Docker Compose — vLLM + Open WebUI | Multi-service orchestration — chat UI + inference |
+| **Pattern 07** | Prometheus + Grafana | Observability — dashboards for throughput, latency, GPU |
+
+The final stack (Pattern 07) is a 4-container system: **vLLM** serves the model, **Open WebUI** provides the chat interface, **Prometheus** scrapes metrics every 15 seconds, and **Grafana** renders real-time dashboards. This is the same architectural pattern used by production inference platforms — just simplified for learning.
 
 ---
 
@@ -204,6 +239,55 @@ Services defined in `docker-compose.yml`:
 
 ---
 
+## Pattern 07 — Deployment Monitoring (Prometheus + Grafana)
+
+**Problem:** You have a multi-service stack (Pattern 06), but you're flying blind. No visibility into request throughput, token generation speed, GPU memory pressure, or latency. When something breaks, you have zero historical data to debug.
+
+**Directory:** `patterns/07-deployment-monitering/`
+
+```bash
+cd patterns/07-deployment-monitering
+docker compose up -d
+```
+
+Services defined in `compose.yml`:
+
+| Service | Port | Purpose |
+|---------|------|---------|
+| **vLLM** | `:8000` | Inference engine with built-in `/metrics` endpoint |
+| **Open WebUI** | `:3000` | ChatGPT-style chat interface for users |
+| **Prometheus** | `:9090` | Time-series database — scrapes vLLM metrics every 15 seconds |
+| **Grafana** | `:3001` | Dashboard UI — auto-configured with LLM metrics dashboard |
+
+**What you learn:** Prometheus scrape config, Grafana provisioning, PromQL queries (rate, histogram_quantile), observability patterns, metric types (counter, gauge, histogram), the USE method (Utilization, Saturation, Errors) applied to LLM inference.
+
+**Files provided in `patterns/07-deployment-monitering/`:**
+
+| File | Purpose |
+|------|---------|
+| `compose.yml` | Multi-service stack with vLLM, Open WebUI, Prometheus, Grafana |
+| `prometheus/prometheus.yml` | Scrape config — targets vLLM at `:8000/metrics` every 15s |
+| `grafana/datasources/datasource.yml` | Auto-provisions Prometheus as Grafana data source |
+| `grafana/dashboards/dashboard.yml` | Auto-imports dashboards from JSON files on startup |
+| `grafana/dashboards/llm-metrics.json` | 6-panel dashboard: request rate, token throughput, active/waiting requests, GPU cache usage, TTFT P90, E2E latency P50/P95/P99 |
+
+**Explanation:** Pattern 06 solved the problem of running multiple services together, but a deployed LLM is still a black box. You don't know if the GPU is near capacity, if latency is degrading, or if throughput is dropping. Pattern 07 solves this by adding the standard observability stack — Prometheus + Grafana — on top of the existing vLLM + Open WebUI setup.
+
+The key insight is that **vLLM already exposes Prometheus metrics** at `/metrics` on port 8000. You don't need to instrument your code or add a metrics library. The `/metrics` endpoint outputs hundreds of metrics covering request counts, token throughput (split into prompt and generation), latency histograms (time-to-first-token and end-to-end), GPU KV-cache usage, and scheduler state.
+
+**Prometheus** (`prom/prometheus:latest`) is configured via `prometheus.yml` to scrape `http://vllm:8000/metrics` every 15 seconds. The config file is bind-mounted as read-only so Prometheus picks it up immediately. Metric data is stored in the `prometheus-data` named volume with 30-day retention. Prometheus waits for vLLM's health check to pass before scraping — no empty metrics during model loading.
+
+**Grafana** (`grafana/grafana:latest`) auto-configures itself using provisioning files. The `datasources/datasource.yml` creates a Prometheus data source pointing at `http://prometheus:9090`. The `dashboards/` directory contains a JSON dashboard (`llm-metrics.json`) that Grafana imports automatically on startup. The dashboard has 6 panels across two rows:
+
+- **Row 1 (overview):** Request rate (req/s), token throughput split by prompt/generation, active vs waiting request count
+- **Row 2 (resource + latency):** GPU cache usage gauge with color thresholds, P90 time-to-first-token, and E2E latency at P50/P95/P99
+
+Default Grafana login is `admin / admin`. The port is mapped to `:3001` to avoid conflicting with Open WebUI on `:3000`.
+
+**Production?** ✅ Yes — this is the standard observability stack for LLM deployments. In production you would additionally add Loki (logs), Alertmanager (alerts), and Tempo (tracing).
+
+---
+
 ## Quick Reference
 
 | # | Pattern | Directory | What LLM Problem It Solves |
@@ -214,6 +298,7 @@ Services defined in `docker-compose.yml`:
 | 04 | Production Dockerfile | `04-production-dockerfile/` | Fast rebuilds, small images, auto-recovery |
 | 05 | Python vLLM Library | `05-python-vllm-library/` | Programmatic control, custom endpoints |
 | 06 | Docker Compose | `06-docker-compose-stack/` | Multi-service stack (vLLM + Open WebUI) |
+| 07 | Deployment Monitoring | `07-deployment-monitering/` | Observability with Prometheus + Grafana |
 
 ---
 
@@ -231,9 +316,11 @@ Services defined in `docker-compose.yml`:
 05 (python vLLM library)
  ↓
 06 (docker compose stack)
+ ↓
+07 (deployment monitoring)
 ```
 
-Each pattern introduces one new concept and builds on the previous. Pattern 06 combines everything — custom Dockerfile, env vars, volumes, HEALTHCHECK, resource management, and a chat UI — all composed together. Skip what you know, but the numbered order is the recommended learning path.
+Each pattern introduces one new concept and builds on the previous. Pattern 06 combines everything — custom Dockerfile, env vars, volumes, HEALTHCHECK, resource management, and a chat UI — all composed together. Pattern 07 adds observability on top of the stack so you can see what's happening inside the black box. Skip what you know, but the numbered order is the recommended learning path.
 
 ---
 

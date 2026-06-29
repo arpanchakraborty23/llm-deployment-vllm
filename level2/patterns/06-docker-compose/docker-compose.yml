@@ -158,6 +158,10 @@ services:
     environment:
       OPENAI_API_BASE_URL: http://vllm:8000/v1
       OPENAI_API_KEY: anything
+      ENABLE_SIGNUP: "true"
+      DEFAULT_USER_ROLE: "user"
+      ENABLE_EMAIL_VERIFICATION: "false"
+      ENABLE_LOGIN_FORM: "true"
 
     # Wait for vLLM to be healthy before starting Open WebUI.
     # Without this, Open WebUI starts immediately and shows connection
