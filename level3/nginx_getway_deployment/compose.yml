@@ -28,12 +28,13 @@ services:
       # Leave empty to allow all requests (no auth).
       NGINX_API_KEY: ${NGINX_API_KEY:-}
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/templates/nginx.conf:ro
+      - ./nginx/nginx.conf:/etc/nginx/templates/nginx.conf.template:ro
     command:
       - sh
       - -c
       - |
-        envsubst '${NGINX_API_KEY}' < /etc/nginx/templates/nginx.conf > /etc/nginx/nginx.conf
+        apk add --no-cache gettext >/dev/null 2>&1
+        envsubst '${NGINX_API_KEY}' < /etc/nginx/templates/nginx.conf.template > /etc/nginx/nginx.conf
         exec nginx -g 'daemon off;'
     depends_on:
       vllm:
@@ -118,7 +119,7 @@ services:
     container_name: llm-grafana
     restart: unless-stopped
     ports:
-      - "3001:3000"
+      - "3000:3000"
     volumes:
       - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
       - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
