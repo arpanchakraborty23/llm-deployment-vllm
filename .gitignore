@@ -1,2 +1,4 @@
 .venv
+.env
+.env.*
 llm_deployment_repo_guide.pdf

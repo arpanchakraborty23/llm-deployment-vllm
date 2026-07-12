@@ -1,0 +1,438 @@
+{
+  "title": "vLLM Inference Metrics",
+  "uid": "vllm-metrics",
+  "tags": ["vllm", "llm", "inference"],
+  "schemaVersion": 39,
+  "version": 2,
+  "timezone": "browser",
+  "panels": [
+    {
+      "title": "Request Rate",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
+      "targets": [
+        {
+          "expr": "rate(vllm:num_requests_total[1m])",
+          "legendFormat": "requests/sec"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "color": {"mode": "palette-classic"}
+        }
+      }
+    },
+    {
+      "title": "Token Throughput",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
+      "targets": [
+        {
+          "expr": "rate(vllm:prompt_tokens_total[1m])",
+          "legendFormat": "prompt tokens/s"
+        },
+        {
+          "expr": "rate(vllm:generation_tokens_total[1m])",
+          "legendFormat": "generation tokens/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {"mode": "palette-classic"}
+        }
+      }
+    },
+    {
+      "title": "Active & Waiting Requests",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
+      "targets": [
+        {
+          "expr": "vllm:num_requests_running",
+          "legendFormat": "running"
+        },
+        {
+          "expr": "vllm:num_requests_waiting",
+          "legendFormat": "waiting"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"}
+        }
+      }
+    },
+    {
+      "title": "GPU KV Cache Usage",
+      "type": "gauge",
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 8},
+      "targets": [
+        {
+          "expr": "vllm:gpu_cache_usage_perc"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 70},
+              {"color": "red", "value": 90}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "CPU Swap Cache Usage",
+      "type": "gauge",
+      "gridPos": {"h": 8, "w": 6, "x": 6, "y": 8},
+      "targets": [
+        {
+          "expr": "vllm:cpu_cache_usage_perc"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 50},
+              {"color": "red", "value": 80}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Time to First Token (P90)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 6, "x": 12, "y": 8},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.9, rate(vllm:time_to_first_token_seconds_bucket[5m]))",
+          "legendFormat": "P90 TTFT"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {"mode": "palette-classic"}
+        }
+      }
+    },
+    {
+      "title": "Preemptions (cache evictions)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 8},
+      "targets": [
+        {
+          "expr": "rate(vllm:num_preemptions_total[5m])",
+          "legendFormat": "preemptions/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {"mode": "fixed", "fixedColor": "red"}
+        }
+      }
+    },
+    {
+      "title": "End-to-End Latency (P50 / P95 / P99)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, rate(vllm:e2e_request_latency_seconds_bucket[5m]))",
+          "legendFormat": "P50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(vllm:e2e_request_latency_seconds_bucket[5m]))",
+          "legendFormat": "P95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(vllm:e2e_request_latency_seconds_bucket[5m]))",
+          "legendFormat": "P99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {"mode": "palette-classic"}
+        }
+      }
+    },
+    {
+      "title": "Time Per Output Token (P50 / P95)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, rate(vllm:time_per_output_token_seconds_bucket[5m]))",
+          "legendFormat": "P50 TPOT"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(vllm:time_per_output_token_seconds_bucket[5m]))",
+          "legendFormat": "P95 TPOT"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {"mode": "palette-classic"}
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "P95 TPOT"},
+            "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "orange"}}]
+          }
+        ]
+      },
+      "description": "Inter-token latency, the key driver of perceived streaming speed. Watch for spikes correlated with GPU cache pressure."
+    },
+    {
+      "title": "Queue Time (P50 / P95)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 24},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, rate(vllm:request_queue_time_seconds_bucket[5m]))",
+          "legendFormat": "P50 queue"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(vllm:request_queue_time_seconds_bucket[5m]))",
+          "legendFormat": "P95 queue"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {"mode": "palette-classic"}
+        }
+      },
+      "description": "Time a request waits before scheduling begins. Rising queue time = saturation, a good autoscaling trigger for HPA/KEDA."
+    },
+    {
+      "title": "Prefill vs Decode Time (P50)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 24},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, rate(vllm:request_prefill_time_seconds_bucket[5m]))",
+          "legendFormat": "prefill P50"
+        },
+        {
+          "expr": "histogram_quantile(0.5, rate(vllm:request_decode_time_seconds_bucket[5m]))",
+          "legendFormat": "decode P50"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {"mode": "palette-classic"}
+        }
+      },
+      "description": "Splits e2e latency into prompt-processing vs generation phases — useful for spotting whether long-context prefill or long-output decode dominates cost."
+    },
+    {
+      "title": "Requests Finished by Reason",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 24},
+      "targets": [
+        {
+          "expr": "sum by (finished_reason) (rate(vllm:request_success_total[5m]))",
+          "legendFormat": "{{finished_reason}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "color": {"mode": "palette-classic"}
+        }
+      },
+      "description": "Breaks down completions by stop / length / abort, etc. A rising 'length' share often means max_tokens is being hit too often."
+    },
+    {
+      "title": "Prompt Length Distribution",
+      "type": "heatmap",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+      "targets": [
+        {
+          "expr": "sum(increase(vllm:request_prompt_tokens_bucket[5m])) by (le)",
+          "format": "heatmap",
+          "legendFormat": "{{le}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        }
+      }
+    },
+    {
+      "title": "Generation Length Distribution",
+      "type": "heatmap",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+      "targets": [
+        {
+          "expr": "sum(increase(vllm:request_generation_tokens_bucket[5m])) by (le)",
+          "format": "heatmap",
+          "legendFormat": "{{le}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        }
+      }
+    },
+    {
+      "title": "Speculative Decoding Acceptance Rate",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 40},
+      "targets": [
+        {
+          "expr": "rate(vllm:spec_decode_num_accepted_tokens_total[5m]) / rate(vllm:spec_decode_num_draft_tokens_total[5m])",
+          "legendFormat": "acceptance rate"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "max": 1,
+          "min": 0,
+          "color": {"mode": "palette-classic"}
+        }
+      },
+      "description": "Only populated if speculative decoding / draft model is enabled."
+    },
+    {
+      "title": "LoRA Adapters Running",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 40},
+      "targets": [
+        {
+          "expr": "vllm:num_requests_running{adapter!=\"\"}",
+          "legendFormat": "{{adapter}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"}
+        }
+      },
+      "description": "Useful if you're serving multiple LoRA adapters on a shared base model."
+    },
+    {
+      "title": "Iteration Token Throughput (batch efficiency)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 40},
+      "targets": [
+        {
+          "expr": "rate(vllm:iteration_tokens_total_sum[1m]) / rate(vllm:iteration_tokens_total_count[1m])",
+          "legendFormat": "avg tokens/iteration"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {"mode": "palette-classic"}
+        }
+      },
+      "description": "A proxy for continuous batching efficiency — higher avg tokens per scheduler iteration generally means better GPU utilization."
+    },
+    {
+      "title": "GPU Utilization (DCGM)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 48},
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_GPU_UTIL",
+          "legendFormat": "GPU {{gpu}} util %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "max": 100,
+          "min": 0,
+          "color": {"mode": "palette-classic"}
+        }
+      }
+    },
+    {
+      "title": "GPU Memory Used (DCGM)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 6, "x": 6, "y": 48},
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_FB_USED",
+          "legendFormat": "GPU {{gpu}} mem used"
+        },
+        {
+          "expr": "DCGM_FI_DEV_FB_FREE",
+          "legendFormat": "GPU {{gpu}} mem free"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "mbytes",
+          "color": {"mode": "palette-classic"}
+        }
+      }
+    },
+    {
+      "title": "GPU Temperature (DCGM)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 6, "x": 12, "y": 48},
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_GPU_TEMP",
+          "legendFormat": "GPU {{gpu}} temp"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "celsius",
+          "color": {"mode": "palette-classic"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 75},
+              {"color": "red", "value": 85}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "GPU Power Draw (DCGM)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 48},
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_POWER_USAGE",
+          "legendFormat": "GPU {{gpu}} watts"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "color": {"mode": "palette-classic"}
+        }
+      }
+    }
+  ]
+}
