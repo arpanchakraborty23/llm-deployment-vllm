@@ -1,0 +1,212 @@
+# =============================================================================
+# LiteLLM Proxy Deployment
+# AI Gateway — Unified API for 100+ LLM Providers + Admin UI
+# =============================================================================
+#
+# Profiles:
+#   default        — LiteLLM proxy standalone (no DB, no UI login)
+#   with-db        — LiteLLM + Postgres (virtual keys, spend tracking, UI auth)
+#   with-vllm      — LiteLLM + vLLM inference server (self-hosted model)
+#   full-stack     — LiteLLM + Postgres + vLLM + Prometheus + Grafana
+#
+# START: docker compose --profile <profile> up -d
+# STOP:  docker compose --profile <profile> down
+# URLS:
+#   - LiteLLM API:    http://localhost:4000
+#   - Admin UI:       http://localhost:4000/ui
+#   - Swagger docs:   http://localhost:4000/docs
+#   - vLLM (direct):  http://localhost:8000  (standalone access for debugging)
+#   - Prometheus:     http://localhost:9090  (full-stack only)
+#   - Grafana:        http://localhost:3000  (full-stack only, admin / admin)
+# =============================================================================
+
+services:
+
+  # ===========================================================================
+  # LiteLLM — AI Gateway Proxy
+  # ===========================================================================
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: litellm-proxy
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    env_file:
+      - .env
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    command:
+      - "--config"
+      - "/app/config.yaml"
+      - "--detailed_debug"
+    profiles:
+      - ""
+      - with-vllm
+    networks:
+      - llm-net
+
+  # ===========================================================================
+  # LiteLLM + Database — Enables virtual keys, spend tracking, UI login
+  # ===========================================================================
+  litellm-db:
+    image: ghcr.io/berriai/litellm-database:main-latest
+    container_name: litellm-proxy-db
+    restart: unless-stopped
+    ports:
+      - "4001:4000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://llmproxy:dbpassword9090@postgres:5432/litellm
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    command:
+      - "--config"
+      - "/app/config.yaml"
+      - "--detailed_debug"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles:
+      - with-db
+      - full-stack
+    networks:
+      - llm-net
+
+  # ===========================================================================
+  # Postgres — Required for virtual keys, spend tracking, teams, UI auth
+  # ===========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: litellm-postgres
+    restart: unless-stopped
+    expose:
+      - "5432"
+    environment:
+      POSTGRES_USER: llmproxy
+      POSTGRES_PASSWORD: dbpassword9090
+      POSTGRES_DB: litellm
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U llmproxy -d litellm"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    profiles:
+      - with-db
+      - full-stack
+    networks:
+      - llm-net
+
+  # ===========================================================================
+  # vLLM — Self-Hosted Inference Engine (model provider for LiteLLM)
+  # ===========================================================================
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: litellm-vllm
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    shm_size: 16g
+    command:
+      - "--model"
+      - "${VLLM_MODEL:-Qwen/Qwen3-0.6B}"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--gpu-memory-utilization"
+      - "0.90"
+      - "--max-model-len"
+      - "4096"
+      - "--enable-prefix-caching"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+    profiles:
+      - with-vllm
+      - full-stack
+    networks:
+      - llm-net
+
+  # ===========================================================================
+  # Prometheus — Metrics Scraper (scrapes LiteLLM + vLLM at /metrics)
+  # ===========================================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: litellm-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+    depends_on:
+      vllm:
+        condition: service_healthy
+    profiles:
+      - full-stack
+    networks:
+      - llm-net
+
+  # ===========================================================================
+  # Grafana — Metrics Dashboard
+  # ===========================================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: litellm-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    depends_on:
+      prometheus:
+        condition: service_started
+    profiles:
+      - full-stack
+    networks:
+      - llm-net
+
+# =============================================================================
+# Named Volumes
+# =============================================================================
+volumes:
+  hf-cache:
+  pgdata:
+  prometheus-data:
+  grafana-data:
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  llm-net:
+    driver: bridge

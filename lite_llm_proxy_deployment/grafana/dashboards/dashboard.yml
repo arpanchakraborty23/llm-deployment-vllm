@@ -1,0 +1,18 @@
+# =============================================================================
+# Grafana Dashboard Provider
+# =============================================================================
+# Auto-imports dashboard JSON files from this directory on startup.
+# =============================================================================
+
+apiVersion: 1
+
+providers:
+  - name: "LiteLLM"
+    orgId: 1
+    folder: ""
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 10
+    options:
+      path: /etc/grafana/provisioning/dashboards

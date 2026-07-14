@@ -1,0 +1,96 @@
+# =============================================================================
+# LiteLLM Proxy Configuration
+# =============================================================================
+# Model list, provider credentials, and general settings for the AI gateway.
+#
+# Model naming convention:
+#   model_name:        — User-facing alias (what clients send in requests)
+#   litellm_params:
+#     model:           — provider/model-identifier (e.g. openai/gpt-4o)
+#     api_key:         — Can be inline or "os.environ/ENV_VAR_NAME"
+#     api_base:        — Custom base URL (required for self-hosted models)
+# =============================================================================
+
+model_list:
+  # OpenAI example
+  - model_name: gpt-4o-mini
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+  # Anthropic example
+  - model_name: claude-sonnet
+    litellm_params:
+      model: anthropic/claude-sonnet-4-20250514
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # Azure OpenAI example
+  - model_name: azure-gpt-4o
+    litellm_params:
+      model: azure/gpt-4o-deployment
+      api_key: os.environ/AZURE_API_KEY
+      api_base: os.environ/AZURE_API_BASE
+      api_version: "2025-01-01-preview"
+
+  # Google Vertex AI example
+  - model_name: gemini-flash
+    litellm_params:
+      model: vertex_ai/gemini-2.0-flash-001
+      vertex_project: os.environ/VERTEX_PROJECT
+      vertex_location: os.environ/VERTEX_LOCATION
+
+  # AWS Bedrock example
+  - model_name: bedrock-claude
+    litellm_params:
+      model: bedrock/anthropic.claude-v2
+      aws_region_name: us-east-1
+
+  # vLLM (self-hosted, e.g. your local vLLM server)
+  - model_name: local-vllm
+    litellm_params:
+      model: openai/Qwen3-0.6B
+      api_base: http://host.docker.internal:8000/v1
+      api_key: none
+
+  # Ollama (local)
+  - model_name: ollama-llama3
+    litellm_params:
+      model: ollama/llama3.2
+      api_base: http://host.docker.internal:11434
+
+  # HuggingFace TGI
+  - model_name: hf-starcoder
+    litellm_params:
+      model: huggingface/bigcode/starcoder
+      api_key: os.environ/HF_API_KEY
+
+# =============================================================================
+# General Settings
+# =============================================================================
+general_settings:
+  # Master key — required for Admin UI access and virtual key generation
+  # Must start with "sk-". Set via LITELLM_MASTER_KEY in .env
+  master_key: os.environ/LITELLM_MASTER_KEY
+
+  # Database URL — required for virtual keys, spend tracking, teams
+  # Only needed when using the litellm-database image or when DATABASE_URL is set
+  database_url: os.environ/DATABASE_URL
+
+  # Allow user API key auth (clients can pass their own provider keys)
+  allow_user_auth: false
+
+# =============================================================================
+# LiteLLM SDK Settings
+# =============================================================================
+litellm_settings:
+  # Drop unsupported parameters instead of failing
+  drop_params: true
+
+  # Set default timeout for provider API calls (seconds)
+  request_timeout: 300
+
+  # Disable telemetry
+  telemetry: false
+
+  # SSL verification (disable for self-signed certs)
+  ssl_verify: true
